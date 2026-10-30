@@ -28,19 +28,19 @@ Twinsweep is a single program file. There is no installer and nothing else to in
 
    | Computer | File |
    |---|---|
-   | Windows (most PCs) | `twinsweep-1.0.0-windows-amd64.exe` |
-   | Windows on ARM (Surface Pro X, Copilot+ PCs) | `twinsweep-1.0.0-windows-arm64.exe` |
-   | Mac with Apple silicon (M1 and later) | `twinsweep-1.0.0-darwin-arm64` |
-   | Intel Mac | `twinsweep-1.0.0-darwin-amd64` |
-   | Linux PC / server | `twinsweep-1.0.0-linux-amd64` |
-   | Linux on ARM (Raspberry Pi 4/5 64-bit) | `twinsweep-1.0.0-linux-arm64` |
+   | Windows (most PCs) | `twinsweep-1.0.1-windows-amd64.exe` |
+   | Windows on ARM (Surface Pro X, Copilot+ PCs) | `twinsweep-1.0.1-windows-arm64.exe` |
+   | Mac with Apple silicon (M1 and later) | `twinsweep-1.0.1-darwin-arm64` |
+   | Intel Mac | `twinsweep-1.0.1-darwin-amd64` |
+   | Linux PC / server | `twinsweep-1.0.1-linux-amd64` |
+   | Linux on ARM (Raspberry Pi 4/5 64-bit) | `twinsweep-1.0.1-linux-arm64` |
 
 2. (Recommended) Check the download wasn't corrupted. Compare the output with the matching line in
    `SHA256SUMS.txt`:
 
    ```powershell
    # Windows PowerShell
-   Get-FileHash .\twinsweep-1.0.0-windows-amd64.exe -Algorithm SHA256
+   Get-FileHash .\twinsweep-1.0.1-windows-amd64.exe -Algorithm SHA256
    ```
    ```sh
    # macOS / Linux (run in the folder containing both files)
@@ -68,7 +68,7 @@ Twinsweep is a single program file. There is no installer and nothing else to in
    ```
    twinsweep version
    ```
-   You should see something like `twinsweep 1.0.0 (windows/amd64)`.
+   You should see something like `twinsweep 1.0.1 (windows/amd64)`.
 
 ---
 

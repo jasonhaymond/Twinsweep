@@ -3,7 +3,7 @@
 Find and safely clean up duplicate files **and duplicate folders** on Windows, macOS and Linux.
 One self-contained binary, no installer, no runtime, no network access.
 
-**Current version: 1.0.0** — first stable release. **Download:** [Releases page](https://github.com/jasonhaymond/Twinsweep/releases)
+**Current version: 1.0.1**. **Download:** [Releases page](https://github.com/jasonhaymond/Twinsweep/releases)
 (Windows, macOS, Linux; x86-64 and ARM64). History: [CHANGELOG.md](CHANGELOG.md).
 
 ## Documentation

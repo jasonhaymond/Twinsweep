@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 Back to [README](README.md).
 
+## [1.0.1] - 2026-10-30
+
+### Fixed
+- `SHA256SUMS.txt` is now written with Unix line endings on every OS. Built on Windows it previously had
+  Windows line endings, so `sha256sum -c SHA256SUMS.txt` on Linux/macOS reported "no file was verified".
+  The binaries were never affected. The v1.0.0 release's checksum file has been corrected in place
+  (same hashes, line endings only). No change to the program itself.
+
 ## [1.0.0] - 2026-10-30
 
 First stable release: the command-line interface, report format (schema 1) and browser app are now

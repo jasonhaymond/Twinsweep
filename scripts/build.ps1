@@ -50,7 +50,12 @@ foreach ($t in $targets) {
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 
 # Checksums in the same format as `sha256sum` so `sha256sum -c` works on Linux/macOS.
-Get-ChildItem dist -File | Where-Object Name -ne 'SHA256SUMS.txt' | ForEach-Object {
+# Written with Unix (LF) line endings on every OS: Set-Content would use
+# Windows CRLF when run on Windows, and the stray "\r" then becomes part of
+# each file name, so `sha256sum -c` reports "no file was verified".
+$lines = Get-ChildItem dist -File | Where-Object Name -ne 'SHA256SUMS.txt' | Sort-Object Name | ForEach-Object {
   "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
-} | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+}
+$sums = Join-Path (Resolve-Path dist) 'SHA256SUMS.txt'
+[IO.File]::WriteAllText($sums, ($lines -join "`n") + "`n", [Text.Encoding]::ASCII)
 Write-Host "Wrote dist/SHA256SUMS.txt"
