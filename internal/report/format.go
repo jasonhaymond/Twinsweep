@@ -29,6 +29,36 @@ func HumanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// ParseSize turns a human size into bytes: "0", "512", "4K", "10M", "2G",
+// "1T" (1024-based, optional trailing "B", case-insensitive). Used by the
+// --min-size flag and the browser UI's "Minimum size" field.
+func ParseSize(v string) (int64, error) {
+	s := strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(v)), "B")
+	mult := int64(1)
+	if n := len(s); n > 0 {
+		// A trailing unit letter sets the multiplier and is stripped.
+		switch s[n-1] {
+		case 'K':
+			mult = 1 << 10
+		case 'M':
+			mult = 1 << 20
+		case 'G':
+			mult = 1 << 30
+		case 'T':
+			mult = 1 << 40
+		}
+		if mult > 1 {
+			s = s[:n-1]
+		}
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	// Reject negatives and anything that would overflow once multiplied.
+	if err != nil || n < 0 || n > (1<<62)/mult {
+		return 0, fmt.Errorf("invalid size %q (examples: 0, 4K, 10M, 1G)", v)
+	}
+	return n * mult, nil
+}
+
 // WriteText prints a summary followed by the largest `limit` groups (limit
 // <= 0 means all). Output goes to w (normally the terminal).
 func WriteText(w io.Writer, r *Report, limit int) {

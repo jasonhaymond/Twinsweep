@@ -340,6 +340,44 @@ func TestFastModeReportIsVerified(t *testing.T) {
 	}
 }
 
+// TestStartingReportsSteps proves the progress hook reports each copy's
+// steps in order (check keeper, verify, remove) before its outcome, which is
+// what the browser's progress dialog relies on.
+func TestStartingReportsSteps(t *testing.T) {
+	f := newFixture(t, pair, false)
+	var steps []string
+	o := f.opts(true)
+	o.Starting = func(e report.Entry, step string) { steps = append(steps, step) }
+	if _, err := f.clean(o, "dupe/a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	want := StepCheckKeeper + "," + StepVerify + "," + StepRemove
+	if got := strings.Join(steps, ","); got != want {
+		t.Fatalf("steps = %q, want %q", got, want)
+	}
+}
+
+// TestCheckMatchesRun proves Check (used by the browser before starting a
+// background job) rejects exactly what Run rejects, without touching disk.
+func TestCheckMatchesRun(t *testing.T) {
+	f := newFixture(t, pair, false)
+	all := []int{f.id("dupe/a.txt"), f.id("keep/a.txt")}
+	if err := Check(f.rep, all, f.opts(true)); err == nil {
+		t.Fatal("Check allowed removing every copy")
+	}
+	if err := Check(f.rep, []int{9999}, f.opts(true)); err == nil {
+		t.Fatal("Check allowed an unknown ID")
+	}
+	del := f.opts(true)
+	del.Action = Delete
+	if err := Check(f.rep, []int{f.id("dupe/a.txt")}, del); !errors.Is(err, ErrNeedsConfirmation) {
+		t.Fatalf("Check on unconfirmed delete: %v", err)
+	}
+	if err := Check(f.rep, []int{f.id("dupe/a.txt")}, f.opts(true)); err != nil || !tu.Exists(f.path("dupe/a.txt")) {
+		t.Fatalf("valid Check failed or touched disk: %v", err)
+	}
+}
+
 // TestCancelStopsBeforeNextItem proves a cancelled cleanup stops instead of
 // carrying on removing things.
 func TestCancelStopsBeforeNextItem(t *testing.T) {

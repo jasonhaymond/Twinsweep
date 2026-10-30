@@ -223,18 +223,29 @@ func Read(path string) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
+	r, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return r, nil
+}
+
+// Parse decodes and validates a report from raw JSON bytes. Used by Read,
+// and by the browser UI's "Load report" (which uploads the file's contents
+// rather than a path). Applies every check described on Read.
+func Parse(data []byte) (*Report, error) {
 	var r Report
 	if err := json.Unmarshal(data, &r); err != nil {
-		return nil, fmt.Errorf("%s is not a valid report: %w", path, err)
+		return nil, fmt.Errorf("not a valid report: %w", err)
 	}
 	if r.Tool != ToolName {
-		return nil, fmt.Errorf("%s is not a Twinsweep report", path)
+		return nil, fmt.Errorf("not a Twinsweep report")
 	}
 	if r.Schema != SchemaVersion {
-		return nil, fmt.Errorf("%s uses report schema %d; this version of Twinsweep reads schema %d", path, r.Schema, SchemaVersion)
+		return nil, fmt.Errorf("uses report schema %d; this version of Twinsweep reads schema %d", r.Schema, SchemaVersion)
 	}
 	if err := r.Validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, err
 	}
 	return &r, nil
 }

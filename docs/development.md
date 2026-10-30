@@ -17,12 +17,12 @@ Back to [README](../README.md) · Related: [User guide](user-guide.md) · [Chang
 
 | Path | What it is |
 |---|---|
-| `cmd/twinsweep/main.go` | Command-line parsing and output for `scan`, `clean`, `serve`, `version` |
+| `cmd/twinsweep/main.go` | Command-line parsing and output for `scan`, `clean`, `ui` (alias `serve`), `version`; `browser_*.go` open the browser per OS |
 | `internal/scan/` | Read-only walking, hashing, duplicate file + folder detection |
 | `internal/keep/` | Keep rules (which copy of each group survives) |
 | `internal/clean/` | The only code that removes anything: re-verification, removal, action log |
 | `internal/trash/` | Recycle Bin / Trash per OS (`trash_windows.go`, `trash_darwin.go`, `trash_unix.go`) |
-| `internal/web/` | Review page server + embedded `static/` HTML/JS/CSS |
+| `internal/web/` | Browser app: `server.go` (security, routing), `jobs.go` (background scan + cleanup with progress), `api.go` (folder browser, report export/load, auto-select, activity log), `places_*.go` (picker starting points), embedded `static/` HTML/JS/CSS |
 | `internal/report/` | Report data model, JSON read/write, text and CSV output |
 | `internal/pathutil/` | Path containment/equality helpers (safety-critical) |
 | `internal/version/` | The single app version constant |
@@ -71,7 +71,7 @@ destination in `internal/clean` tests (`Options.TrashFunc`), so they never touch
 |---|---|
 | `scan` | Correct grouping; same-size-different-content never grouped; partial-hash collisions caught; hardlinks collapsed; symlinks never followed; nested roots can't self-duplicate; folder grouping and topmost reduction; fast mode |
 | `clean` | Dry run changes nothing; last copy never removed; unknown IDs rejected; modified/content-swapped/symlink-swapped targets refused; missing/changed keeper refused; hardlink-to-keeper refused; tampered report can't remove unique files; keeper-inside-removed-folder refused; permanent delete needs confirmation; cancellation stops |
-| `web` | 401 without session; one-time sign-in link; DNS-rebinding Host rejection; CSRF (origin, Sec-Fetch-Site, token, content type); security headers, no CORS; static path traversal; ID-only targeting; all-copies refusal; typed DELETE; body size limit |
+| `web` | 401 without session; one-time sign-in link; DNS-rebinding Host rejection; CSRF (origin, Sec-Fetch-Site, token, content type); security headers, no CORS; static path traversal; ID-only targeting; all-copies refusal; typed DELETE; body size limit; CSRF + auth on every new endpoint (scan, cancel, load, clean, stop); scan validation (relative paths, bad size/mode/workers); folder browser lists folders only; report upload validation; export as attachment; cleanup job progress, Stop-between-items, and refusal of second cleanup / scan / Quit while running |
 | `trash` | Linux: freedesktop layout, URL-encoded `.trashinfo`, name collisions, symlinked `.Trash-$UID` rejected. Windows: network paths refused with `ErrNoTrash`; real Recycle Bin test opt-in via `TWINSWEEP_TEST_RECYCLE=1` |
 | `keep`, `pathutil` | Each rule picks the right copy; `--prefer` wins; containment edge cases (`Data2` vs `Data`, roots, case folding) |
 
@@ -90,7 +90,7 @@ wsl -d Ubuntu -- sh -c 'mkdir -p /tmp/twl && cp /mnt/c/Users/$USER/AppData/Local
 Expected: `PASS` for each package, with no `SKIP` lines when run with `-test.v`. (If your Windows and WSL
 user names differ, adjust the `/mnt/c/Users/...` path.)
 
-**Manual / UI checks** before calling a UI change done: run `twinsweep serve` on a test tree, check the
+**Manual / UI checks** before calling a UI change done: run `twinsweep ui` on a test tree, walk Scan → Review → cleanup → Activity, check the
 page at desktop width and at ~390 px wide (browser dev tools device mode), in light and dark mode, and
 take screenshots. Also test the CLI failure paths: missing folder, unknown `--keep`, permanent delete
 without the confirmation flag.

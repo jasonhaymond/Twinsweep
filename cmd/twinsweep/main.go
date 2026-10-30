@@ -1,9 +1,10 @@
 // Command twinsweep is the program's entry point: it reads the command line
 // and runs one of the subcommands below.
 //
+//	twinsweep                     the browser app (or help, when there's no desktop session)
 //	twinsweep scan  <folders...>  find duplicates, print/save a report (read-only)
 //	twinsweep clean --report ...  remove duplicates chosen by a keep rule (dry run unless --apply)
-//	twinsweep serve <folders...>  scan and open the review page in a browser
+//	twinsweep ui [folders...]     the browser app (scan, review, export, clean); "serve" is an alias
 //	twinsweep version             print the version
 //
 // Where it sits: this file only parses arguments and prints results. The
@@ -53,12 +54,18 @@ const (
 const usage = `Twinsweep %s - find and clean up duplicate files and folders.
 
 Usage:
+  twinsweep                                Open the browser app (same as "twinsweep ui"; on a
+                                           system with no desktop session, prints this help)
+  twinsweep ui                             Open the browser app: scan, review, export, clean up
+  twinsweep ui [options] <folder>...       Open the browser app and scan these folders now
+  twinsweep ui --report FILE               Open the browser app with a saved report
   twinsweep scan  [options] <folder>...    Find duplicates (never changes anything)
   twinsweep clean --report FILE --keep RULE [options]
                                            Remove duplicates (dry run unless --apply)
-  twinsweep serve [options] <folder>...    Scan, then review in your browser
-  twinsweep serve --report FILE            Review a saved report in your browser
   twinsweep version
+
+  ("serve" is the same command as "ui". Options with no command, e.g.
+  "twinsweep --port 8080", are passed to "ui".)
 
 Run "twinsweep <command> -h" for that command's options.
 
@@ -68,17 +75,37 @@ Typical use:
   twinsweep clean --report report.json --keep oldest --prefer D:\Photos --apply
 `
 
-// main hands off to run so tests could call run with their own arguments
-// and output streams.
+// headlessHelp is printed (with the usage) when `twinsweep` is run with no
+// command where there's no desktop to open a browser in.
+const headlessHelp = `No desktop session detected (SSH session, or no graphical display), so the
+browser app was not opened. Use the commands below, or start the app anyway
+with "twinsweep ui --no-browser" and reach it through an SSH tunnel
+(ssh -L 8080:127.0.0.1:8080 ..., with "twinsweep ui --no-browser --port 8080").
+
+`
+
+// main hands off to runWith so tests can call it with their own arguments,
+// output streams and environment.
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runWith(os.Args[1:], os.Stdout, os.Stderr, os.Getenv))
 }
 
-// run dispatches to a subcommand and returns the process exit code.
-func run(args []string, stdout, stderr io.Writer) int {
+// runWith dispatches to a subcommand and returns the process exit code.
+//
+// With no arguments (e.g. the program was double-clicked) it opens the
+// browser app, unless isHeadless says there's no desktop to show it in, in
+// which case it prints help. Arguments that start with "-" but aren't a
+// help/version flag are options for the browser app ("twinsweep --port 8080").
+func runWith(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	if len(args) == 0 {
-		fmt.Fprintf(stderr, usage, version.Version)
-		return exitUsage
+		if isHeadless(getenv) {
+			fmt.Fprint(stderr, headlessHelp)
+			fmt.Fprintf(stderr, usage, version.Version)
+			return exitUsage
+		}
+		args = []string{"ui"}
+	} else if strings.HasPrefix(args[0], "-") && !isHelpOrVersion(args[0]) {
+		args = append([]string{"ui"}, args...)
 	}
 	// signal.NotifyContext gives a context that is cancelled when the user
 	// presses Ctrl+C (SIGINT) or the OS asks us to stop (SIGTERM), so scans
@@ -91,12 +118,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdScan(ctx, args[1:], stdout, stderr)
 	case "clean":
 		return cmdClean(ctx, args[1:], stdout, stderr)
-	case "serve":
+	case "ui", "serve":
 		return cmdServe(ctx, args[1:], stdout, stderr)
-	case "version", "--version", "-v":
+	case "version", "--version", "-version", "-v":
 		fmt.Fprintf(stdout, "twinsweep %s (%s/%s)\n", version.Version, runtime.GOOS, runtime.GOARCH)
 		return exitOK
-	case "help", "-h", "--help":
+	case "help", "-h", "--help", "-help":
 		fmt.Fprintf(stdout, usage, version.Version)
 		return exitOK
 	default:
@@ -104,6 +131,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, usage, version.Version)
 		return exitUsage
 	}
+}
+
+// isHelpOrVersion reports whether a leading flag is one of the top-level
+// help/version flags rather than an option for the browser app.
+func isHelpOrVersion(a string) bool {
+	switch a {
+	case "-h", "--help", "-help", "-v", "--version", "-version":
+		return true
+	}
+	return false
 }
 
 // ---------- shared flag helpers ----------
@@ -119,31 +156,13 @@ type sizeFlag int64
 
 func (s *sizeFlag) String() string { return strconv.FormatInt(int64(*s), 10) }
 
-// Set parses one size value; the suffix (K/M/G/T, optional trailing B) sets
-// the multiplier.
+// Set parses one size value via report.ParseSize (shared with the browser UI).
 func (s *sizeFlag) Set(v string) error {
-	v = strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(v)), "B")
-	mult := int64(1)
-	if n := len(v); n > 0 {
-		switch v[n-1] {
-		case 'K':
-			mult = 1 << 10
-		case 'M':
-			mult = 1 << 20
-		case 'G':
-			mult = 1 << 30
-		case 'T':
-			mult = 1 << 40
-		}
-		if mult > 1 {
-			v = v[:n-1]
-		}
+	n, err := report.ParseSize(v)
+	if err != nil {
+		return err
 	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n < 0 {
-		return fmt.Errorf("invalid size %q (examples: 0, 4K, 10M, 1G)", v)
-	}
-	*s = sizeFlag(n * mult)
+	*s = sizeFlag(n)
 	return nil
 }
 
@@ -407,43 +426,52 @@ func cmdClean(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 // ---------- serve ----------
 
-// cmdServe implements `twinsweep serve`: starts the review server on
-// 127.0.0.1 only, prints a one-time sign-in link, and opens the browser.
+// cmdServe implements `twinsweep serve` (alias `twinsweep ui`): starts the
+// browser app on 127.0.0.1 only, prints a one-time sign-in link, and opens
+// the browser. With folders it starts scanning them right away; with
+// --report it opens that report; with neither it opens on the Scan screen.
 func cmdServe(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	sf := addScanFlags(fs)
-	reportPath := fs.String("report", "", "review a saved report instead of scanning")
+	reportPath := fs.String("report", "", "open a saved report instead of scanning")
 	port := fs.Int("port", 0, "port on 127.0.0.1 to listen on (0 = pick a free one)")
 	noBrowser := fs.Bool("no-browser", false, "don't open the browser automatically; just print the link")
 	logPath := fs.String("log", "", "action log file (default: "+clean.DefaultLogPath()+")")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: twinsweep serve [options] <folder>...\n       twinsweep serve --report FILE\n\nOpens a review page (on this computer only) to choose which copies to remove.\n\nOptions:")
+		fmt.Fprintln(stderr, "Usage: twinsweep ui [options] [folder...]\n       twinsweep ui --report FILE\n\nOpens the Twinsweep browser app (on this computer only) to scan, review,\nexport and clean up. Folders given here are scanned straight away.\n`serve` is the same command.\n\nOptions:")
 		fs.PrintDefaults()
 	}
 	roots, err := parseInterspersed(fs, args)
 	if err != nil {
 		return exitUsage
 	}
-	if (*reportPath == "") == (len(roots) == 0) {
-		fs.Usage()
+	if *reportPath != "" && len(roots) > 0 {
+		fmt.Fprintln(stderr, "give either folders to scan or --report, not both")
 		return exitUsage
 	}
 
 	cfg := web.Config{LogPath: *logPath}
-	if *reportPath != "" {
+	switch {
+	case *reportPath != "":
 		if cfg.Report, err = report.Read(*reportPath); err != nil {
 			fmt.Fprintln(stderr, err)
 			return exitError
 		}
-	} else {
-		cfg.ScanOpts = sf.options(roots)
+	case len(roots) > 0:
+		opts := sf.options(roots)
+		cfg.ScanOpts = &opts
 		if _, err := scan.NormalizeRoots(roots); err != nil {
 			fmt.Fprintln(stderr, err)
 			return exitError
 		}
 		warnNestedRoots(roots, stderr)
 	}
+
+	// The app's lifetime: cancelled on Ctrl+C (ctx) or by the page's Quit
+	// button (below), which stops any running scan/cleanup between items.
+	appCtx, stopApp := context.WithCancel(ctx)
+	defer stopApp()
 
 	// Listen on the loopback address ONLY - the page is never reachable
 	// from the network, even if the firewall is off.
@@ -452,12 +480,11 @@ func cmdServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "could not start the review server:", err)
 		return exitError
 	}
-	srv, err := web.New(cfg, ln.Addr().(*net.TCPAddr).Port)
+	srv, err := web.New(appCtx, cfg, ln.Addr().(*net.TCPAddr).Port)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitError
 	}
-	srv.StartScan(ctx)
 	// ReadHeaderTimeout stops a client that opens a connection and never
 	// finishes sending headers from tying the server up ("slowloris").
 	httpSrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
@@ -468,7 +495,7 @@ func cmdServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}()
 
 	link := srv.SignInURL()
-	fmt.Fprintf(stdout, "Twinsweep review page: %s\n", link)
+	fmt.Fprintf(stdout, "Twinsweep is open at: %s\n", link)
 	fmt.Fprintln(stdout, "This link works once. Press Enter here for a fresh link; Ctrl+C or the page's Quit button to stop.")
 	if !*noBrowser {
 		if err := openBrowser(link); err != nil {
@@ -490,6 +517,7 @@ func cmdServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	case <-srv.Done():
 	}
 	fmt.Fprintln(stdout, "Stopping.")
+	stopApp() // stop any running scan/cleanup before its next item
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutCtx)

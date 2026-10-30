@@ -70,7 +70,19 @@ type Options struct {
 	// Progress, if set, is called once per copy as soon as its outcome is
 	// known, so the CLI can stream results.
 	Progress func(Outcome)
+	// Starting, if set, is called when work on a copy begins, with a short
+	// description of the step ("checking the kept copy", "verifying",
+	// "removing"), so a progress display can show what's happening during
+	// long operations such as hashing or trashing a large folder.
+	Starting func(e report.Entry, step string)
 }
+
+// Step names passed to Options.Starting.
+const (
+	StepCheckKeeper = "checking the kept copy"
+	StepVerify      = "verifying"
+	StepRemove      = "removing"
+)
 
 // Status is the result for one selected copy.
 type Status string
@@ -120,37 +132,13 @@ type Result struct {
 // the partial Result plus ctx's error.
 func Run(ctx context.Context, rep *report.Report, remove []int, opts Options) (*Result, error) {
 	// --- Validate the request as a whole before touching anything. ---
-	if opts.Action != Trash && opts.Action != Delete {
-		return nil, fmt.Errorf("unknown action %q (use trash or delete)", opts.Action)
-	}
-	if opts.Apply && opts.Action == Delete && !opts.ConfirmPermanent {
-		return nil, ErrNeedsConfirmation
+	selected, err := validate(rep, remove, opts)
+	if err != nil {
+		return nil, err
 	}
 	trashFn := opts.TrashFunc
 	if trashFn == nil {
 		trashFn = trash.MoveToTrash
-	}
-
-	// Map each requested ID to its entry; IDs (not paths) are the only way
-	// to select something, so nothing outside the report can be targeted.
-	selected := map[int]bool{}
-	for _, id := range remove {
-		if g, e := rep.FindEntry(id); g == nil || e == nil {
-			return nil, fmt.Errorf("copy #%d is not in this report", id)
-		}
-		selected[id] = true
-	}
-	// Rule 1: at least one copy of every group must be left unselected.
-	for _, g := range rep.Groups() {
-		n := 0
-		for _, e := range g.Entries {
-			if selected[e.ID] {
-				n++
-			}
-		}
-		if n > 0 && n == len(g.Entries) {
-			return nil, fmt.Errorf("group %d: every copy is selected for removal; at least one copy must be kept", g.ID)
-		}
 	}
 
 	// Paths of every selected folder, used for rule 2 and to avoid
@@ -168,7 +156,6 @@ func Run(ctx context.Context, rep *report.Report, remove []int, opts Options) (*
 	var log *actionLog
 	if opts.Apply {
 		// No audit trail, no removals: if the log can't be opened, stop now.
-		var err error
 		if log, err = openLog(opts.LogPath); err != nil {
 			return nil, fmt.Errorf("cannot open action log: %w", err)
 		}
@@ -196,6 +183,55 @@ func Run(ctx context.Context, rep *report.Report, remove []int, opts Options) (*
 		}
 	}
 	return res, nil
+}
+
+// Check validates a cleanup request exactly as Run would, without doing any
+// work or touching the disk. The browser UI calls it before starting a
+// background cleanup so a bad request is reported immediately rather than
+// from inside the background job.
+func Check(rep *report.Report, remove []int, opts Options) error {
+	_, err := validate(rep, remove, opts)
+	return err
+}
+
+// validate applies the whole-request rules and returns the selected entry
+// IDs as a set (a map used as "is this ID selected?").
+func validate(rep *report.Report, remove []int, opts Options) (map[int]bool, error) {
+	if opts.Action != Trash && opts.Action != Delete {
+		return nil, fmt.Errorf("unknown action %q (use trash or delete)", opts.Action)
+	}
+	if opts.Apply && opts.Action == Delete && !opts.ConfirmPermanent {
+		return nil, ErrNeedsConfirmation
+	}
+	// Map each requested ID to its entry; IDs (not paths) are the only way
+	// to select something, so nothing outside the report can be targeted.
+	selected := map[int]bool{}
+	for _, id := range remove {
+		if g, e := rep.FindEntry(id); g == nil || e == nil {
+			return nil, fmt.Errorf("copy #%d is not in this report", id)
+		}
+		selected[id] = true
+	}
+	// Rule 1: at least one copy of every group must be left unselected.
+	for _, g := range rep.Groups() {
+		n := 0
+		for _, e := range g.Entries {
+			if selected[e.ID] {
+				n++
+			}
+		}
+		if n > 0 && n == len(g.Entries) {
+			return nil, fmt.Errorf("group %d: every copy is selected for removal; at least one copy must be kept", g.ID)
+		}
+	}
+	return selected, nil
+}
+
+// starting reports the current item/step to the optional callback.
+func (r *runner) starting(e report.Entry, step string) {
+	if r.opts.Starting != nil {
+		r.opts.Starting(e, step)
+	}
 }
 
 // runner carries per-run state between groups.
@@ -286,6 +322,8 @@ func (r *runner) group(g *report.Group, targets, others []report.Entry) error {
 	var kept report.Entry
 	var keptInfo fs.FileInfo
 	var lastErr error
+	// Re-hashing a large kept folder can take a while; tell the UI.
+	r.starting(real[0], StepCheckKeeper)
 	for _, s := range survivors {
 		h, info, err := r.verifyKeeper(g, s)
 		if err == nil {
@@ -304,6 +342,7 @@ func (r *runner) group(g *report.Group, targets, others []report.Entry) error {
 		if err := r.ctx.Err(); err != nil {
 			return err
 		}
+		r.starting(t, StepVerify)
 		if reason := r.verifyTarget(g, t, ref, keptInfo); reason != "" {
 			r.record(g, t, Refused, reason, kept.Path)
 			continue
@@ -312,6 +351,7 @@ func (r *runner) group(g *report.Group, targets, others []report.Entry) error {
 			r.record(g, t, WouldRemove, "", kept.Path)
 			continue
 		}
+		r.starting(t, StepRemove)
 		err := r.remove(g, t)
 		r.log.write(r.opts.Action, g, t, kept.Path, ref, err)
 		if err != nil {

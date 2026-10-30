@@ -1,12 +1,14 @@
 <!doctype html>
 <!--
-  Twinsweep review page. Served by internal/web/server.go only after the
+  Twinsweep browser app. Served by internal/web/server.go only after the
   browser has signed in with the one-time link. The session token in the
   twinsweep-token meta tag is filled in by Go's html/template (which escapes
-  it); app.js sends it back in a header on
-  every change request as CSRF protection. No inline scripts or styles are
-  allowed by the page's Content Security Policy - everything is in
-  /static/app.js and /static/style.css.
+  it); app.js sends it back in a header on every change request as CSRF
+  protection. No inline scripts or styles are allowed by the page's Content
+  Security Policy - everything is in /static/app.js and /static/style.css.
+
+  Layout: a header with three screens (Scan, Review, Activity) and a few
+  dialogs (folder picker, cleanup progress, permanent-delete confirmation).
 -->
 <html lang="en">
 <head>
@@ -16,53 +18,149 @@
   <meta name="twinsweep-trash" content="{{.TrashName}}">
   <title>Twinsweep</title>
   <link rel="icon" href="data:,"><!-- empty icon: stops the browser requesting /favicon.ico -->
-
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <header class="top">
     <div class="brand"><span class="logo" aria-hidden="true"></span>Twinsweep <span class="ver">v{{.Version}}</span></div>
-    <div id="summary" class="summary"></div>
+    <nav class="nav" aria-label="Screens">
+      <button type="button" data-view="scan" id="nav-scan">Scan</button>
+      <button type="button" data-view="review" id="nav-review">Review <span class="pill" id="nav-review-count" hidden></span></button>
+      <button type="button" data-view="log" id="nav-log">Activity</button>
+    </nav>
     <button id="quit" class="ghost small" type="button">Quit</button>
   </header>
 
   <main>
-    <section id="scanning" class="panel" hidden>
-      <h2>Scanning…</h2>
-      <p id="scan-phase" class="muted"></p>
-      <div class="bar"><div id="scan-bar"></div></div>
-      <p id="scan-counts" class="muted"></p>
+    <div id="notice" class="panel notice" hidden></div>
+
+    <!-- ===================== Scan screen ===================== -->
+    <section id="view-scan" class="view" hidden>
+      <div id="scan-progress" class="panel" hidden>
+        <div class="row-between">
+          <h2>Scanning…</h2>
+          <button id="scan-cancel" class="ghost" type="button">Cancel scan</button>
+        </div>
+        <p id="scan-phase" class="muted"></p>
+        <div class="bar"><div id="scan-bar"></div></div>
+        <p id="scan-counts" class="muted"></p>
+      </div>
+
+      <div id="scan-form">
+        <div class="panel">
+          <h2>Folders to scan</h2>
+          <p class="muted small">Listed in priority order — the "first scan folder" keep rule keeps copies from folders higher in this list.</p>
+          <ol id="roots" class="roots"></ol>
+          <p id="roots-empty" class="muted small">No folders yet. Browse for one or type a full path.</p>
+          <div class="row">
+            <input id="root-input" placeholder="Type a full folder path, e.g. D:\Photos" aria-label="Folder path">
+            <button id="root-add" type="button">Add</button>
+            <button id="root-browse" class="primary" type="button">Browse…</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Options</h2>
+          <div class="options">
+            <fieldset>
+              <legend>How to compare</legend>
+              <label class="choice"><input type="radio" name="mode" value="exact" checked>
+                <span><b>Exact</b> — compare file contents (reliable)</span></label>
+              <label class="choice"><input type="radio" name="mode" value="fast">
+                <span><b>Fast</b> — same name and size only (contents are still checked before anything is removed)</span></label>
+            </fieldset>
+            <fieldset>
+              <legend>What to find</legend>
+              <label class="choice"><input type="checkbox" id="opt-folders" checked>
+                <span>Duplicate folders (whole identical folder trees)</span></label>
+              <label class="choice"><input type="checkbox" id="opt-defexcl" checked>
+                <span>Skip Recycle Bin / Trash and system index folders</span></label>
+            </fieldset>
+            <label class="field">Ignore files smaller than
+              <input id="opt-minsize" value="1" placeholder="1" aria-describedby="minsize-help">
+              <span id="minsize-help" class="muted small">bytes, or e.g. 4K, 10M, 1G. "1" skips empty files.</span>
+            </label>
+            <label class="field">Files read in parallel
+              <input id="opt-workers" type="number" min="1" max="64" value="4">
+              <span class="muted small">1–2 for spinning disks / NAS, 8+ for fast SSDs.</span>
+            </label>
+            <label class="field wide">Skip names matching (one pattern per line)
+              <textarea id="opt-excludes" rows="3" placeholder="node_modules&#10;*.tmp"></textarea>
+              <span class="muted small"><code>*</code> matches any characters within a name. A pattern containing <code>\</code> or <code>/</code> must match the whole path.</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="row">
+          <button id="scan-start" class="primary big" type="button">Start scan</button>
+          <span class="muted">or</span>
+          <label class="button ghost">Open a saved report…<input id="load-file" type="file" accept=".json,application/json" hidden></label>
+        </div>
+        <p class="muted small">Scanning only reads files. Nothing is changed until you choose to remove copies on the Review screen.</p>
+      </div>
     </section>
 
-    <section id="error" class="panel bad" hidden></section>
-    <section id="results" class="panel" hidden></section>
+    <!-- ===================== Review screen ===================== -->
+    <section id="view-review" class="view" hidden>
+      <p id="review-empty" class="panel muted" hidden>No report yet. Run a scan or open a saved report on the Scan screen.</p>
+      <div id="review-body" hidden>
+        <div class="panel stats" id="stats"></div>
 
-    <section id="review" hidden>
-      <div class="toolbar">
-        <div class="tabs" role="tablist">
-          <button role="tab" type="button" data-tab="folder" id="tab-folder">Folders <span class="count" id="count-folder"></span></button>
-          <button role="tab" type="button" data-tab="file" id="tab-file">Files <span class="count" id="count-file"></span></button>
+        <div class="toolbar">
+          <div class="tabs" role="tablist">
+            <button role="tab" type="button" id="tab-folder">Folders <span class="count" id="count-folder"></span></button>
+            <button role="tab" type="button" id="tab-file">Files <span class="count" id="count-file"></span></button>
+          </div>
+          <input id="filter" type="search" placeholder="Filter by path…" aria-label="Filter by path">
         </div>
-        <input id="filter" type="search" placeholder="Filter by path…" aria-label="Filter by path">
+
+        <details class="panel auto" id="auto-panel">
+          <summary>Auto-select copies to remove</summary>
+          <div class="auto-grid">
+            <label class="field">Keep the
+              <select id="strategy">
+                <option value="shortest-path">copy with the shortest path</option>
+                <option value="oldest">oldest copy</option>
+                <option value="newest">newest copy</option>
+                <option value="first-root">copy in the first scan folder</option>
+              </select>
+            </label>
+            <label class="field">Apply to
+              <select id="kinds">
+                <option value="all">folders and files</option>
+                <option value="folders">folders only</option>
+                <option value="files">files only</option>
+              </select>
+            </label>
+            <label class="field wide">Always keep copies inside (one folder per line, optional)
+              <textarea id="prefer" rows="2" placeholder="D:\Photos"></textarea>
+            </label>
+          </div>
+          <div class="row">
+            <button id="auto" class="primary" type="button">Auto-select</button>
+            <button id="clear" class="ghost" type="button">Clear selection</button>
+          </div>
+        </details>
+
+        <p class="hint muted">Ticked copies will be removed. Every group always keeps at least one copy. Everything is re-checked against the disk before it's removed.</p>
+        <div id="groups"></div>
+        <button id="more" class="ghost wide" type="button" hidden>Show more</button>
+        <p id="empty" class="muted center" hidden>No duplicates here.</p>
       </div>
-      <div class="toolbar auto">
-        <label>Keep
-          <select id="strategy">
-            <option value="shortest-path">shortest path</option>
-            <option value="oldest">oldest</option>
-            <option value="newest">newest</option>
-            <option value="first-root">first scan folder</option>
-          </select>
-        </label>
-        <input id="prefer" placeholder="Prefer copies in folder (optional)" aria-label="Preferred folder">
-        <button id="auto" type="button">Auto-select</button>
-        <button id="clear" class="ghost" type="button">Clear selection</button>
+    </section>
+
+    <!-- ===================== Activity screen ===================== -->
+    <section id="view-log" class="view" hidden>
+      <div class="panel">
+        <div class="row-between">
+          <h2>Activity log</h2>
+          <button id="log-refresh" class="ghost small" type="button">Refresh</button>
+        </div>
+        <p class="muted small" id="log-path"></p>
+        <div class="table-wrap tall"><table class="log-table" id="log-table"></table></div>
+        <p id="log-empty" class="muted" hidden>Nothing has been removed yet.</p>
       </div>
-      <p class="hint muted">Ticked copies will be removed. Every group always keeps at least one copy. Removals are re-checked against the disk before anything happens.</p>
-      <div id="groups"></div>
-      <button id="more" class="ghost wide" type="button" hidden>Show more</button>
-      <p id="empty" class="muted center" hidden>No duplicates here.</p>
     </section>
   </main>
 
@@ -75,12 +173,40 @@
     </div>
   </footer>
 
+  <!-- Folder picker -->
+  <dialog id="picker" class="dialog-wide">
+    <div class="row-between"><h3>Choose a folder</h3><button id="picker-close" class="ghost small" type="button">Close</button></div>
+    <div class="crumb"><button id="picker-up" class="ghost small" type="button">↑ Up</button><span id="picker-path" class="path"></span></div>
+    <ul id="picker-list" class="picker-list"></ul>
+    <p id="picker-msg" class="muted small"></p>
+    <div class="row-end">
+      <button id="picker-cancel" class="ghost" type="button">Cancel</button>
+      <button id="picker-choose" class="primary" type="button" disabled>Add this folder</button>
+    </div>
+  </dialog>
+
+  <!-- Cleanup progress / results -->
+  <dialog id="progress" class="dialog-wide">
+    <h3 id="prog-title"></h3>
+    <div class="bar big"><div id="prog-bar"></div></div>
+    <p id="prog-counts"></p>
+    <p id="prog-current" class="path small"></p>
+    <div class="chips" id="prog-chips"></div>
+    <div id="prog-summary"></div>
+    <div class="table-wrap"><table class="results-table" id="prog-table"></table></div>
+    <div class="row-end">
+      <button id="prog-stop" class="danger" type="button">Stop after current item</button>
+      <button id="prog-close" class="primary" type="button" hidden>Close</button>
+    </div>
+  </dialog>
+
+  <!-- Permanent delete confirmation -->
   <dialog id="confirm">
     <h3>Permanently delete?</h3>
     <p id="confirm-text"></p>
     <p>This <b>cannot be undone</b> — nothing goes to the {{.TrashName}}. Type <b>DELETE</b> to confirm.</p>
     <input id="confirm-input" autocomplete="off" aria-label="Type DELETE to confirm">
-    <div class="row">
+    <div class="row-end">
       <button id="confirm-cancel" class="ghost" type="button">Cancel</button>
       <button id="confirm-go" class="danger" type="button" disabled>Delete permanently</button>
     </div>

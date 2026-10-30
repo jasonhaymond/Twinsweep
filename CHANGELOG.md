@@ -5,6 +5,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 Back to [README](README.md).
 
+## [0.2.0] - 2026-10-30
+
+The review page is now a full browser app.
+
+### Added
+- `twinsweep ui` (alias of `serve`) opens the app with no arguments; folders or `--report` remain optional.
+- Running `twinsweep` with no command (e.g. double-clicking it) opens the browser app. On a headless
+  system (SSH session, or Linux/BSD with no `DISPLAY`/`WAYLAND_DISPLAY`) it prints help instead, with
+  SSH-tunnel instructions. Options with no command (`twinsweep --port 8080`) go to the app.
+- **Scan screen:** pick folders with a built-in folder browser (drives, home, subfolders) or by typing
+  paths; reorder them by priority; set every scan option (exact/fast, duplicate folders, minimum size,
+  exclude patterns, system-folder skipping, parallel reads); live progress with **Cancel**.
+- **Open a saved report** from a file; reports are validated exactly like `--report`.
+- **Review screen:** scan statistics and unreadable-item list, **Rescan**, **Download report** (JSON) and
+  **Download CSV**, auto-select with multiple preferred folders and folders/files/all scope.
+- **Cleanup progress dialog:** cleanup (and dry runs) run as a background job showing items and bytes
+  done, the current item and step (checking kept copy / verifying / removing), running
+  removed/refused/failed counts, recent results, and **Stop after current item**.
+- **Activity screen:** the action log (what was removed, when, how, and which copy was kept).
+- `clean.Options.Starting` progress hook and `clean.Check` (request validation without running).
+
+### Changed
+- `serve` no longer requires folders or a report.
+- Quit is refused while a cleanup is running; a running scan is cancelled on Quit.
+
+### Security
+- New endpoints use the existing session, CSRF, Host-check and CSP protections; the folder browser
+  lists folder names only (no files, no links) for the signed-in session; scan requests require
+  absolute paths and are bounded (folders, patterns, workers); report uploads are capped at 256 MiB
+  and fully validated; a second cleanup, a scan, or a report load is refused while a cleanup runs.
+- Accepted risk: the folder picker can list folder names anywhere the user's own account can open
+  (no base-folder confinement), because choosing scan folders anywhere is its purpose.
+
 ## [0.1.0] - 2026-10-30
 
 First release.

@@ -1,16 +1,21 @@
-// Package web is the local review page behind `twinsweep serve`: a small
-// HTTP server on this computer only (127.0.0.1) that shows scan results in a
-// browser and lets the user pick which copies to remove.
+// Package web is Twinsweep's browser app behind `twinsweep serve` / `ui`: a
+// small HTTP server on this computer only (127.0.0.1) that lets the user
+// pick folders and scan them, review and export results, load saved reports,
+// choose and remove duplicates with live progress, and read the action log.
 //
-// Where it sits: cmd/twinsweep starts it; it calls internal/scan to scan,
+// Where it sits: cmd/twinsweep starts it. It calls internal/scan to scan,
 // internal/keep for "Auto-select", and internal/clean to remove. It never
 // removes anything by itself - every removal goes through clean.Run with all
-// of its re-verification.
+// of its re-verification. Files in this package:
+//
+//	server.go  - setup, security middleware, routing, page + static files
+//	jobs.go    - background scan and cleanup jobs, progress, cancellation
+//	api.go     - folder browser, report export/load, auto-select, action log
 //
 // Why it needs real security even though it's "only localhost": any web page
 // open in ANY browser tab can try to send requests to 127.0.0.1, and other
 // user accounts on the same machine can connect to the port too. Since this
-// server can delete files, it defends against:
+// server can list folders and delete files, it defends against:
 //
 //   - Other local users / programs: every request needs a random session
 //     token held in an httpOnly cookie. The token is handed out through a
@@ -27,8 +32,9 @@
 //   - XSS via hostile file names (e.g. a file named "<img onerror=...>"): the
 //     page inserts names only as plain text, and a strict Content Security
 //     Policy forbids inline scripts so injected markup couldn't run anyway.
-//   - Targeting arbitrary paths: requests name copies by report entry ID,
-//     never by path, so only things the scan found can be touched.
+//   - Targeting arbitrary paths for removal: cleanup requests name copies by
+//     report entry ID, never by path, so only things a scan found (and
+//     cleanup re-verifies) can be touched.
 package web
 
 import (
@@ -38,7 +44,6 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -48,9 +53,6 @@ import (
 	"strings"
 	"sync"
 
-	"twinsweep/internal/clean"
-	"twinsweep/internal/keep"
-	"twinsweep/internal/pathutil"
 	"twinsweep/internal/report"
 	"twinsweep/internal/scan"
 	"twinsweep/internal/version"
@@ -68,14 +70,18 @@ var static embed.FS
 const csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; " +
 	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
-// maxBody caps request bodies (8 MiB is ~1 million selected IDs) so a
-// runaway or malicious request can't exhaust memory.
-const maxBody = 8 << 20
+// Request body limits, so a runaway or malicious request can't exhaust
+// memory. maxBody (8 MiB, ~1 million selected IDs) covers ordinary API
+// calls; maxReportBody allows uploading a large saved report.
+const (
+	maxBody       = 8 << 20
+	maxReportBody = 256 << 20
+)
 
 // Config is what `serve` passes in.
 type Config struct {
-	Report    *report.Report     // a loaded report, or nil to scan with ScanOpts
-	ScanOpts  scan.Options       // used when Report is nil
+	Report    *report.Report     // a report to open with, or nil
+	ScanOpts  *scan.Options      // a scan to start immediately, or nil
 	LogPath   string             // action log override ("" = default)
 	TrashFunc func(string) error // nil = real OS trash (tests override)
 }
@@ -84,16 +90,30 @@ type Config struct {
 type Server struct {
 	cfg  Config
 	port int
+	// ctx is the lifetime of the whole server; cancelling it (Ctrl+C or
+	// Quit) stops any running scan or cleanup before its next item.
+	ctx context.Context
 
-	mu        sync.Mutex // guards everything below
-	state     string     // "scanning", "ready", "error"
-	scanErr   string
-	progress  scan.Progress
-	rep       *report.Report
-	removed   map[int]bool // entry IDs removed during this session
-	busy      bool         // a cleanup is running
-	bootstrap string       // one-time sign-in code ("" once used)
-	session   string       // session token (cookie + CSRF header value)
+	mu sync.Mutex // guards everything below
+
+	// Current report and which of its copies were removed this session.
+	rep        *report.Report
+	repVersion int // bumped whenever rep or removed changes; the page reloads on change
+	removed    map[int]bool
+
+	// Scan job state (jobs.go).
+	scanning   bool
+	scanCancel context.CancelFunc
+	progress   scan.Progress
+	scanErr    string
+	lastScan   *scanRequest // options of the latest scan, to prefill the form / rescan
+
+	// Cleanup job state (jobs.go). nil until the first cleanup.
+	job      *cleanJob
+	jobCount int
+
+	bootstrap string // one-time sign-in code ("" once used)
+	session   string // session token (cookie + CSRF header value)
 
 	quitOnce sync.Once
 	quit     chan struct{}
@@ -111,8 +131,9 @@ func randomToken() (string, error) {
 }
 
 // New creates a server for the given port (the port must already be bound
-// by the caller - see cmd/twinsweep - so the Host check knows it).
-func New(cfg Config, port int) (*Server, error) {
+// by the caller - see cmd/twinsweep - so the Host check knows it). ctx is
+// the server's lifetime. If cfg.ScanOpts is set, that scan starts at once.
+func New(ctx context.Context, cfg Config, port int) (*Server, error) {
 	sess, err := randomToken()
 	if err != nil {
 		return nil, err
@@ -125,37 +146,21 @@ func New(cfg Config, port int) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, port: port, session: sess, bootstrap: boot, removed: map[int]bool{}, quit: make(chan struct{}), index: idx}
+	s := &Server{
+		cfg: cfg, port: port, ctx: ctx, session: sess, bootstrap: boot,
+		removed: map[int]bool{}, quit: make(chan struct{}), index: idx,
+	}
 	if cfg.Report != nil {
-		s.rep, s.state = cfg.Report, "ready"
-	} else {
-		s.state = "scanning"
+		s.rep, s.repVersion = cfg.Report, 1
+		s.lastScan = requestFromReport(cfg.Report)
+	}
+	if cfg.ScanOpts != nil {
+		req := requestFromOptions(*cfg.ScanOpts)
+		if err := s.startScan(*req); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
-}
-
-// StartScan runs the scan in the background (when no report was given).
-// ctx cancels it, e.g. on Ctrl+C.
-func (s *Server) StartScan(ctx context.Context) {
-	if s.cfg.Report != nil {
-		return
-	}
-	opts := s.cfg.ScanOpts
-	opts.Progress = func(p scan.Progress) {
-		s.mu.Lock()
-		s.progress = p
-		s.mu.Unlock()
-	}
-	go func() {
-		rep, err := scan.Run(ctx, opts)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if err != nil {
-			s.state, s.scanErr = "error", err.Error()
-			return
-		}
-		s.rep, s.state = rep, "ready"
-	}()
 }
 
 // Done is closed when the user clicks Quit on the page.
@@ -187,16 +192,28 @@ func (s *Server) NewSignInURL() (string, error) {
 func (s *Server) cookieName() string { return "twinsweep_" + strconv.Itoa(s.port) }
 
 // Handler returns the full HTTP handler with all security layers applied.
+// Every route except "/" (which handles sign-in itself) requires a session;
+// every POST additionally requires the CSRF checks in mutating().
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	// Route patterns: "METHOD /path". {$} means exactly "/", nothing after.
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /static/{name}", s.withSession(s.handleStatic))
+	// Read-only endpoints.
 	mux.HandleFunc("GET /api/status", s.withSession(s.handleStatus))
 	mux.HandleFunc("GET /api/report", s.withSession(s.handleReport))
-	mux.HandleFunc("POST /api/select", s.withSession(s.mutating(s.handleSelect)))
-	mux.HandleFunc("POST /api/clean", s.withSession(s.mutating(s.handleClean)))
-	mux.HandleFunc("POST /api/shutdown", s.withSession(s.mutating(s.handleShutdown)))
+	mux.HandleFunc("GET /api/report/export", s.withSession(s.handleExport))
+	mux.HandleFunc("GET /api/browse", s.withSession(s.handleBrowse))
+	mux.HandleFunc("GET /api/clean/status", s.withSession(s.handleCleanStatus))
+	mux.HandleFunc("GET /api/log", s.withSession(s.handleLog))
+	// State-changing endpoints.
+	mux.HandleFunc("POST /api/scan", s.withSession(s.mutating(maxBody, s.handleScan)))
+	mux.HandleFunc("POST /api/scan/cancel", s.withSession(s.mutating(maxBody, s.handleScanCancel)))
+	mux.HandleFunc("POST /api/report/load", s.withSession(s.mutating(maxReportBody, s.handleLoad)))
+	mux.HandleFunc("POST /api/select", s.withSession(s.mutating(maxBody, s.handleSelect)))
+	mux.HandleFunc("POST /api/clean", s.withSession(s.mutating(maxBody, s.handleClean)))
+	mux.HandleFunc("POST /api/clean/cancel", s.withSession(s.mutating(maxBody, s.handleCleanCancel)))
+	mux.HandleFunc("POST /api/shutdown", s.withSession(s.mutating(maxBody, s.handleShutdown)))
 	return s.secure(mux)
 }
 
@@ -246,8 +263,8 @@ func (s *Server) withSession(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // mutating adds the CSRF checks required for any request that changes
-// something (see the package comment), and caps the body size.
-func (s *Server) mutating(h http.HandlerFunc) http.HandlerFunc {
+// something (see the package comment), and caps the body at limit bytes.
+func (s *Server) mutating(limit int64, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
 			writeError(w, http.StatusForbidden, "cross-origin request refused")
@@ -267,7 +284,7 @@ func (s *Server) mutating(h http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnsupportedMediaType, "expected JSON")
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		h(w, r)
 	}
 }
@@ -358,176 +375,38 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
-// handleStatus reports scan progress / readiness for the page to poll.
+// handleStatus is polled by the page (about once a second) for everything
+// that changes over time: scan progress, cleanup progress, and whether the
+// report changed. Kept small - the report itself comes from /api/report.
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"state": s.state, "error": s.scanErr, "progress": s.progress,
-		"busy": s.busy, "version": version.Version, "trashName": trashName(),
-	})
-}
-
-// liveReport returns a copy of the report without copies already removed
-// this session, dropping groups left with fewer than two copies. Caller
-// must hold s.mu.
-func (s *Server) liveReport() *report.Report {
-	cp := *s.rep
-	filter := func(gs []report.Group) []report.Group {
-		out := []report.Group{}
-		for _, g := range gs {
-			var es []report.Entry
-			for _, e := range g.Entries {
-				if !s.removed[e.ID] {
-					es = append(es, e)
-				}
-			}
-			if len(es) >= 2 {
-				g.Entries = es
-				out = append(out, g)
-			}
-		}
-		return out
+	out := map[string]any{
+		"version": version.Version, "trashName": trashName(), "os": runtime.GOOS,
+		"scanning": s.scanning, "progress": s.progress, "scanError": s.scanErr,
+		"hasReport": s.rep != nil, "reportVersion": s.repVersion, "lastScan": s.lastScan,
+		"cleaning": s.job != nil && s.job.Running,
 	}
-	cp.FolderGroups = filter(s.rep.FolderGroups)
-	cp.FileGroups = filter(s.rep.FileGroups)
-	return &cp
-}
-
-// handleReport sends the current (live) report.
-func (s *Server) handleReport(w http.ResponseWriter, _ *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.state != "ready" {
-		writeError(w, http.StatusConflict, "scan not finished")
-		return
-	}
-	live := s.liveReport()
-	writeJSON(w, http.StatusOK, map[string]any{"report": live, "reclaimable": live.Reclaimable()})
-}
-
-// selectRequest is the body of POST /api/select.
-type selectRequest struct {
-	Strategy string   `json:"strategy"`
-	Prefer   []string `json:"prefer"`
-	Kinds    string   `json:"kinds"`
-}
-
-// handleSelect runs a keep rule ("Auto-select") and returns the IDs it
-// would remove. Changes nothing.
-func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
-	var req selectRequest
-	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
-		return
-	}
-	if req.Kinds == "" {
-		req.Kinds = "all"
-	}
-	s.mu.Lock()
-	if s.state != "ready" {
-		s.mu.Unlock()
-		writeError(w, http.StatusConflict, "scan not finished")
-		return
-	}
-	live := s.liveReport()
-	s.mu.Unlock()
-	ids, err := keep.Select(live, keep.Rule{Strategy: keep.Strategy(req.Strategy), Prefer: req.Prefer}, req.Kinds)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if ids == nil {
-		ids = []int{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"remove": ids})
-}
-
-// cleanRequest is the body of POST /api/clean.
-type cleanRequest struct {
-	Remove  []int  `json:"remove"`
-	Action  string `json:"action"`
-	Apply   bool   `json:"apply"`
-	Confirm string `json:"confirm"` // must be "DELETE" for an applied permanent delete
-}
-
-// handleClean previews (apply=false) or performs a cleanup via clean.Run.
-// Only one cleanup may run at a time.
-func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
-	var req cleanRequest
-	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
-		return
-	}
-	action := clean.Action(req.Action)
-	confirmed := req.Confirm == "DELETE"
-	if req.Apply && action == clean.Delete && !confirmed {
-		writeError(w, http.StatusBadRequest, "type DELETE to confirm permanent deletion")
-		return
-	}
-
-	s.mu.Lock()
-	if s.state != "ready" || s.busy {
-		s.mu.Unlock()
-		writeError(w, http.StatusConflict, "busy - wait for the current scan or cleanup to finish")
-		return
-	}
-	s.busy = true
-	live := s.liveReport()
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.busy = false
-		s.mu.Unlock()
-	}()
-
-	// r.Context() is cancelled if the browser tab is closed mid-run, which
-	// makes clean.Run stop before the next item.
-	res, err := clean.Run(r.Context(), live, req.Remove, clean.Options{
-		Action: action, Apply: req.Apply, ConfirmPermanent: confirmed,
-		LogPath: s.cfg.LogPath, TrashFunc: s.cfg.TrashFunc,
-	})
-	if res == nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if req.Apply {
-		s.markRemoved(res)
-	}
-	out := map[string]any{"result": res}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		out["error"] = err.Error()
+	if s.job != nil {
+		out["clean"] = s.job.snapshot(false)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// markRemoved records which report entries are gone after a cleanup: the
-// removed copies themselves, plus anything inside a removed folder.
-func (s *Server) markRemoved(res *clean.Result) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var folders []string
-	for _, o := range res.Outcomes {
-		if o.Status == clean.Removed {
-			s.removed[o.EntryID] = true
-			if o.Kind == report.KindFolder {
-				folders = append(folders, o.Path)
-			}
-		}
-	}
-	for _, g := range s.rep.Groups() {
-		for _, e := range g.Entries {
-			for _, f := range folders {
-				if pathutil.IsUnder(e.Path, f) {
-					s.removed[e.ID] = true
-				}
-			}
-		}
-	}
-}
-
-// handleShutdown lets the page's Quit button stop the server.
+// handleShutdown lets the page's Quit button stop the server. Refused while
+// a cleanup is running so a half-finished removal run isn't abandoned by a
+// stray click; the user stops the cleanup first.
 func (s *Server) handleShutdown(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	busy := s.job != nil && s.job.Running
+	if !busy && s.scanCancel != nil {
+		s.scanCancel()
+	}
+	s.mu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict, "a cleanup is running - stop it first")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	s.quitOnce.Do(func() { close(s.quit) })
 }
