@@ -11,6 +11,10 @@
     2. staticcheck          - deeper static analysis (bugs, dead code)
     3. gosec                - Go security linter (SAST)
     4. semgrep              - OWASP/Go rulesets (SAST), if installed
+       PSScriptAnalyzer     - PowerShell linter over scripts/, if installed.
+                              PSAvoidUsingWriteHost is excluded: these are
+                              interactive console scripts where coloured
+                              Write-Host output is intended, not a defect.
     5. govulncheck          - known vulnerabilities in dependencies AND in
                               the Go standard library version used, limited
                               to code paths Twinsweep actually calls
@@ -42,7 +46,8 @@ Set-Location (Join-Path $PSScriptRoot '..')
 $version = (Select-String -Path internal/version/version.go -Pattern 'Version = "([^"]+)"').Matches[0].Groups[1].Value
 $commit = (git rev-parse --short HEAD 2>$null)
 if (-not $commit) { $commit = 'uncommitted' }
-$dirty = if (git status --porcelain 2>$null) { ' (+ uncommitted changes)' } else { '' }
+$porcelain = git status --porcelain 2>$null  # lists uncommitted changes, if any
+$dirty = if ($porcelain) { ' (+ uncommitted changes)' } else { '' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 
 # Each check records: name, status (PASS/FAIL/NOT RUN), a one-line summary,
@@ -80,7 +85,7 @@ Invoke-Check 'staticcheck' { go run honnef.co/go/tools/cmd/staticcheck@latest ./
 # suppressions stay visible - but it also makes gosec exit 1 when anything
 # is suppressed, so pass/fail is decided by its "Issues : N" count instead.
 Invoke-Check 'gosec (SAST)' { go run github.com/securego/gosec/v2/cmd/gosec@latest -fmt text -show-ignored ./... } {
-  param($o, $c) $o -match 'Issues\s*:\s*0\b'
+  param($o) $o -match 'Issues\s*:\s*0\b'
 }
 
 # 4. semgrep (optional external tool).
@@ -88,13 +93,24 @@ if (Get-Command semgrep -ErrorAction SilentlyContinue) {
   Invoke-Check 'semgrep (OWASP/Go)' { semgrep scan --config p/golang --config p/owasp-top-ten --error --quiet . }
 } else { Add-NotRun 'semgrep (OWASP/Go)' 'semgrep is not installed (pip install semgrep)' }
 
+# 4b. PowerShell security/quality linter over this repo's own scripts
+# (build, release, this suite). Warnings and errors fail the run.
+if (Get-Module -ListAvailable PSScriptAnalyzer) {
+  Invoke-Check 'PSScriptAnalyzer (scripts)' {
+    $found = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning, Error -ExcludeRule PSAvoidUsingWriteHost
+    $found | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap | Out-String -Width 200
+    "PSScriptAnalyzer findings: $(@($found).Count)"
+  } { param($o) $o -match 'PSScriptAnalyzer findings: 0\b' }
+} else { Add-NotRun 'PSScriptAnalyzer (scripts)' 'module not installed (Install-Module PSScriptAnalyzer -Scope CurrentUser)' }
+
 # 5. Known vulnerabilities in deps + standard library.
 Invoke-Check 'govulncheck (dependencies)' { go run golang.org/x/vuln/cmd/govulncheck@latest ./... }
 
 # 6. Secret scanning (optional external tool).
 if (Get-Command gitleaks -ErrorAction SilentlyContinue) {
   Invoke-Check 'gitleaks (working tree)' { gitleaks dir . --no-banner --redact }
-  if (git rev-parse --git-dir 2>$null) {
+  $gitDir = git rev-parse --git-dir 2>$null  # empty when this isn't a git repository
+  if ($gitDir) {
     Invoke-Check 'gitleaks (staged diff)' { gitleaks git --pre-commit --staged --no-banner --redact . }
   } else { Add-NotRun 'gitleaks (staged diff)' 'not a git repository yet' }
 } else {

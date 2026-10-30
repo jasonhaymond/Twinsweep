@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 Back to [README](README.md).
 
+## [1.0.0] - 2026-10-30
+
+First stable release: the command-line interface, report format (schema 1) and browser app are now
+considered stable. No change to how Twinsweep scans or cleans compared with 0.2.0.
+
+### Added
+- Release binaries for Windows, macOS and Linux (x86-64 and ARM64) with `SHA256SUMS.txt` are published
+  on the GitHub Releases page for each version.
+- `scripts/release.ps1`: builds a version's binaries from its exact tag in a temporary checkout, checks
+  the built version, and publishes them as a GitHub Release with that version's changelog as notes.
+  Refuses tags without a recorded security-review approval or that haven't been pushed; `-DryRun` previews.
+- PSScriptAnalyzer (PowerShell linter) over `scripts/` added to the security suite.
+
+### Known limitations
+- The macOS Recycle Bin/Trash path (via Finder) has not yet been verified on real Mac hardware.
+
 ## [0.2.0] - 2026-10-30
 
 The review page is now a full browser app.

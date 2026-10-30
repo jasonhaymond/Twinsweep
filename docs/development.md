@@ -26,7 +26,8 @@ Back to [README](../README.md) · Related: [User guide](user-guide.md) · [Chang
 | `internal/report/` | Report data model, JSON read/write, text and CSV output |
 | `internal/pathutil/` | Path containment/equality helpers (safety-critical) |
 | `internal/version/` | The single app version constant |
-| `scripts/build.ps1` | Cross-compile all release binaries + checksums |
+| `scripts/build.ps1` | Cross-compile all release binaries + checksums into `dist/` (gitignored) |
+| `scripts/release.ps1` | Build a tagged version's binaries from that exact tag and publish them as a GitHub Release |
 | `scripts/security-check.ps1` | Full security suite + report |
 
 Code is commented for a reader who knows systems but not Go: every file has a header, every function a
@@ -74,14 +75,17 @@ destination in `internal/clean` tests (`Options.TrashFunc`), so they never touch
 | `web` | 401 without session; one-time sign-in link; DNS-rebinding Host rejection; CSRF (origin, Sec-Fetch-Site, token, content type); security headers, no CORS; static path traversal; ID-only targeting; all-copies refusal; typed DELETE; body size limit; CSRF + auth on every new endpoint (scan, cancel, load, clean, stop); scan validation (relative paths, bad size/mode/workers); folder browser lists folders only; report upload validation; export as attachment; cleanup job progress, Stop-between-items, and refusal of second cleanup / scan / Quit while running |
 | `trash` | Linux: freedesktop layout, URL-encoded `.trashinfo`, name collisions, symlinked `.Trash-$UID` rejected. Windows: network paths refused with `ErrNoTrash`; real Recycle Bin test opt-in via `TWINSWEEP_TEST_RECYCLE=1` |
 | `keep`, `pathutil` | Each rule picks the right copy; `--prefer` wins; containment edge cases (`Data2` vs `Data`, roots, case folding) |
+| `cmd/twinsweep` | Headless detection per OS/session (bare `twinsweep` never tries a browser over SSH or without a display); headless bare run prints help; unknown commands still fail |
 
 **Windows can't run the symlink tests** without Developer Mode, so they skip there. Run the Linux pass via
 WSL before every release (no Go needed inside WSL):
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:TEMP\twl" | Out-Null
-foreach ($p in 'clean','keep','pathutil','scan','trash','web') {
-  $env:GOOS='linux'; $env:GOARCH='amd64'; go test -c -o "$env:TEMP\twl\$p.test" "./internal/$p"
+$pkgs = @{ clean = './internal/clean'; keep = './internal/keep'; pathutil = './internal/pathutil'
+          scan = './internal/scan'; trash = './internal/trash'; web = './internal/web'; cmd = './cmd/twinsweep' }
+foreach ($p in $pkgs.Keys) {
+  $env:GOOS='linux'; $env:GOARCH='amd64'; go test -c -o "$env:TEMP\twl\$p.test" $pkgs[$p]
 }
 Remove-Item Env:GOOS, Env:GOARCH
 wsl -d Ubuntu -- sh -c 'mkdir -p /tmp/twl && cp /mnt/c/Users/$USER/AppData/Local/Temp/twl/*.test /tmp/twl/ 2>/dev/null; cd /tmp/twl && for t in *.test; do chmod +x $t; ./$t -test.count=1 | tail -1; done'
@@ -104,41 +108,67 @@ committed, tagged, or shared.
 pwsh ./scripts/security-check.ps1
 ```
 
-It runs gofmt/vet, staticcheck, gosec, semgrep (if installed), govulncheck, gitleaks (if installed), the
-full test suite, and an outdated-dependency check. Missing tools are reported **NOT RUN**, never hidden.
+It runs gofmt/vet, staticcheck, gosec, semgrep (if installed), PSScriptAnalyzer over `scripts/` (if
+installed), govulncheck, gitleaks (if installed), the full test suite, and an outdated-dependency check.
+Missing tools are reported **NOT RUN**, never hidden.
 The report is written to `security-reports/v<version>-<commit>-<timestamp>.md` (gitignored).
 
 Optional tools for full coverage:
 
 ```powershell
-pip install --user semgrep   # SAST with OWASP rulesets
-winget install gitleaks      # secret scanning (brew install gitleaks on macOS)
+pip install --user semgrep                         # SAST with OWASP rulesets
+winget install gitleaks                            # secret scanning (brew install gitleaks on macOS)
+Install-Module PSScriptAnalyzer -Scope CurrentUser # PowerShell linter for scripts/
 ```
 
 Both installers add themselves to PATH for *new* terminals only; open a fresh terminal before re-running
 the suite, or they'll still show NOT RUN.
 
 Approved suppressions are marked in the code with `#nosec <rule> -- reason` (gosec) or
-`nosemgrep: <rule>` (semgrep). The only accepted risk so far is the review page's session cookie lacking
-the `Secure` flag (loopback-only HTTP); see CHANGELOG 0.1.0.
+`nosemgrep: <rule>` (semgrep). Accepted risks so far: the browser app's session cookie lacks the `Secure`
+flag (loopback-only HTTP; CHANGELOG 0.1.0), and the folder picker isn't confined to a base folder
+(choosing scan folders anywhere is its purpose; CHANGELOG 0.2.0).
 
 `#nosec` annotations in the code each carry a reason (e.g. reading user-selected files is the tool's
 purpose). Adding a new one, or weakening any test, must be called out in the report and approved.
 
 ## 5. Releasing a version
 
-1. Finish the batch of changes; bump `internal/version/version.go` and add a `CHANGELOG.md` entry.
+Every release ends with its binaries published as a **GitHub Release** for the version tag. Binaries are
+**not** committed to git (they'd grow the repository by ~55 MB per version, permanently); `dist/` stays
+gitignored.
+
+1. Finish the batch of changes; bump `internal/version/version.go` and add a `CHANGELOG.md` section
+   headed `## [X.Y.Z] - YYYY-MM-DD` (the release script uses it as the release notes).
 2. Run the security gate (above) and the Linux test pass; get approval.
-3. Commit, then tag with the approval recorded:
+3. Commit, re-run the suite against that commit, then tag with the approval recorded and push:
    ```powershell
-   git tag -a v0.1.0 -m "Twinsweep 0.1.0`n`nSecurity review: approved <date>, report <file>, accepted risks: none"
-   git push origin main --tags
+   git tag -a v1.0.0 -m "Twinsweep 1.0.0`n`nSecurity review: approved <date>, report <file>, accepted risks: <n>"
+   git push origin main
+   git push origin v1.0.0
    ```
-4. `pwsh ./scripts/build.ps1` and publish the contents of `dist/`.
+4. Preview the release (builds and verifies, publishes nothing):
+   ```powershell
+   pwsh ./scripts/release.ps1 -DryRun
+   ```
+   Expected: `tag OK: v1.0.0 -> <commit>, security approval recorded, pushed`, six binaries built,
+   `build OK: twinsweep 1.0.0 (...)`, the file list with sizes, and the release notes.
+5. Publish:
+   ```powershell
+   pwsh ./scripts/release.ps1
+   ```
+   Expected: `Published: https://github.com/jasonhaymond/Twinsweep/releases/tag/v1.0.0`. Open it and
+   confirm the 6 binaries and `SHA256SUMS.txt` are attached.
+
+What `release.ps1` enforces: it refuses a tag that isn't annotated, has no `Security review: approved`
+line, or hasn't been pushed; it builds in a temporary checkout of the exact tag (never your working
+folder); it checks the built binary reports the right version; it refuses to touch an existing release
+unless `-Replace` is given. Needs `gh` signed in (`gh auth status`). To release an older tag, pass
+`-Version X.Y.Z`.
 
 Twinsweep has no server or database, so there is no deploy/rollback procedure; rolling back means using
-an older release binary (`git checkout vX.Y.Z` then rebuild). Report files carry a schema number, and
-older versions refuse reports with a schema they don't understand.
+an older release's binaries from the GitHub Releases page (or `git checkout vX.Y.Z` then rebuild). Report
+files carry a schema number, and older versions refuse reports with a schema they don't understand.
 
 ## 6. Design notes
 
@@ -154,7 +184,7 @@ older versions refuse reports with a schema they don't understand.
 - **Windows Recycle Bin:** `SHFileOperationW` with `FOF_ALLOWUNDO | FOF_WANTNUKEWARNING`, gated on
   `GetDriveType == DRIVE_FIXED`. 64-bit only (the struct layout differs on 32-bit).
 - **macOS:** Finder via `/usr/bin/osascript`, path passed as an argument (not interpolated) to avoid
-  AppleScript injection. Untested on real macOS hardware as of 0.1.0 — verify before relying on it.
-- **Review page tokens:** a one-time bootstrap code in the printed URL is exchanged for a session cookie
+  AppleScript injection. Untested on real macOS hardware as of 1.0.0 — verify before relying on it.
+- **Browser app tokens:** a one-time bootstrap code in the printed URL is exchanged for a session cookie
   (httpOnly, SameSite=Strict, port-specific name). Mutating requests also need the session token in
   `X-Twinsweep-Token`, which the page reads from a `<meta>` tag.

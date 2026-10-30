@@ -3,7 +3,8 @@
 Find and safely clean up duplicate files **and duplicate folders** on Windows, macOS and Linux.
 One self-contained binary, no installer, no runtime, no network access.
 
-**Current version: 0.2.0** (adds the full browser app) — see [CHANGELOG.md](CHANGELOG.md) for history.
+**Current version: 1.0.0** — first stable release. **Download:** [Releases page](https://github.com/jasonhaymond/Twinsweep/releases)
+(Windows, macOS, Linux; x86-64 and ARM64). History: [CHANGELOG.md](CHANGELOG.md).
 
 ## Documentation
 
@@ -74,8 +75,9 @@ Requires Go 1.27+ (Twinsweep's only dependency is `golang.org/x/sys`, the Go tea
 ```powershell
 go test ./...                          # all tests
 go build -o dist/twinsweep.exe ./cmd/twinsweep
-pwsh ./scripts/build.ps1               # release binaries for all 6 OS/CPU targets
+pwsh ./scripts/build.ps1               # release binaries for all 6 OS/CPU targets (into dist/)
 pwsh ./scripts/security-check.ps1      # full security suite (required before every commit)
+pwsh ./scripts/release.ps1 -DryRun     # preview publishing a tagged version to GitHub Releases
 ```
 
 See [docs/development.md](docs/development.md) for the full workflow.

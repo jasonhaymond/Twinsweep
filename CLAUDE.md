@@ -12,4 +12,6 @@ Cross-platform duplicate file/folder scanner and cleanup tool (Go, single binary
 - **UI changes:** screenshot `ui` (all three screens + progress dialog) at desktop and ~390 px, light and dark (puppeteer-core + Edge works;
   don't use `isMobile: true` — it reloads the page and wipes state).
 - **Version:** `internal/version/version.go` is the single source; bump with CHANGELOG.md.
+- **Release binaries** go to GitHub Releases via `pwsh ./scripts/release.ps1` after the approved tag is
+  pushed (Jason's decision 2026-10-30) — never commit binaries; `dist/` stays gitignored.
 - **macOS trash** is written to Apple's documented approach but has not been run on a real Mac yet.
