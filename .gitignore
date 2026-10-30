@@ -1,0 +1,26 @@
+# Files git should never track for Twinsweep.
+
+# Build output from scripts/build.ps1 (regenerable from source).
+dist/
+
+# Security-suite reports describe unpatched weaknesses; never commit them
+# (see "Security review gate" in docs/development.md).
+security-reports/
+
+# Scan reports list private file paths from whoever ran the scan.
+*.report.json
+twinsweep-report*.json
+report.json
+
+# Action logs, if someone points --log inside the repo.
+actions.log
+actions.log.1
+
+# Go test/coverage leftovers and editor clutter.
+*.test
+*.out
+coverage.*
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

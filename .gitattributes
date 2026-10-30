@@ -1,0 +1,5 @@
+# Store and check out every text file with LF line endings on all OSes, so
+# gofmt, the embedded web assets and the scripts are byte-identical whether
+# the repo is cloned on Windows, macOS or Linux.
+* text=auto eol=lf
+*.png binary

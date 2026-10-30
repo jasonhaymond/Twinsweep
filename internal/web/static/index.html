@@ -1,0 +1,89 @@
+<!doctype html>
+<!--
+  Twinsweep review page. Served by internal/web/server.go only after the
+  browser has signed in with the one-time link. The session token in the
+  twinsweep-token meta tag is filled in by Go's html/template (which escapes
+  it); app.js sends it back in a header on
+  every change request as CSRF protection. No inline scripts or styles are
+  allowed by the page's Content Security Policy - everything is in
+  /static/app.js and /static/style.css.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="twinsweep-token" content="{{.Token}}">
+  <meta name="twinsweep-trash" content="{{.TrashName}}">
+  <title>Twinsweep</title>
+  <link rel="icon" href="data:,"><!-- empty icon: stops the browser requesting /favicon.ico -->
+
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo" aria-hidden="true"></span>Twinsweep <span class="ver">v{{.Version}}</span></div>
+    <div id="summary" class="summary"></div>
+    <button id="quit" class="ghost small" type="button">Quit</button>
+  </header>
+
+  <main>
+    <section id="scanning" class="panel" hidden>
+      <h2>Scanning…</h2>
+      <p id="scan-phase" class="muted"></p>
+      <div class="bar"><div id="scan-bar"></div></div>
+      <p id="scan-counts" class="muted"></p>
+    </section>
+
+    <section id="error" class="panel bad" hidden></section>
+    <section id="results" class="panel" hidden></section>
+
+    <section id="review" hidden>
+      <div class="toolbar">
+        <div class="tabs" role="tablist">
+          <button role="tab" type="button" data-tab="folder" id="tab-folder">Folders <span class="count" id="count-folder"></span></button>
+          <button role="tab" type="button" data-tab="file" id="tab-file">Files <span class="count" id="count-file"></span></button>
+        </div>
+        <input id="filter" type="search" placeholder="Filter by path…" aria-label="Filter by path">
+      </div>
+      <div class="toolbar auto">
+        <label>Keep
+          <select id="strategy">
+            <option value="shortest-path">shortest path</option>
+            <option value="oldest">oldest</option>
+            <option value="newest">newest</option>
+            <option value="first-root">first scan folder</option>
+          </select>
+        </label>
+        <input id="prefer" placeholder="Prefer copies in folder (optional)" aria-label="Preferred folder">
+        <button id="auto" type="button">Auto-select</button>
+        <button id="clear" class="ghost" type="button">Clear selection</button>
+      </div>
+      <p class="hint muted">Ticked copies will be removed. Every group always keeps at least one copy. Removals are re-checked against the disk before anything happens.</p>
+      <div id="groups"></div>
+      <button id="more" class="ghost wide" type="button" hidden>Show more</button>
+      <p id="empty" class="muted center" hidden>No duplicates here.</p>
+    </section>
+  </main>
+
+  <footer class="actionbar" id="actionbar" hidden>
+    <div id="selinfo"></div>
+    <div class="actions">
+      <button id="preview" class="ghost" type="button">Preview (dry run)</button>
+      <button id="trash" class="primary" type="button">Move to {{.TrashName}}</button>
+      <button id="delete" class="danger" type="button">Delete permanently…</button>
+    </div>
+  </footer>
+
+  <dialog id="confirm">
+    <h3>Permanently delete?</h3>
+    <p id="confirm-text"></p>
+    <p>This <b>cannot be undone</b> — nothing goes to the {{.TrashName}}. Type <b>DELETE</b> to confirm.</p>
+    <input id="confirm-input" autocomplete="off" aria-label="Type DELETE to confirm">
+    <div class="row">
+      <button id="confirm-cancel" class="ghost" type="button">Cancel</button>
+      <button id="confirm-go" class="danger" type="button" disabled>Delete permanently</button>
+    </div>
+  </dialog>
+</body>
+</html>
